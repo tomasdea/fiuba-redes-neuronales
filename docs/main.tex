@@ -1,0 +1,165 @@
+
+\documentclass[12pt,a4paper]{article}
+
+% --- Idioma y codificación ---
+\usepackage[utf8]{inputenc}   % si usas pdflatex
+\usepackage[T1]{fontenc}
+\usepackage[spanish]{babel}
+
+% --- Matemática ---
+\usepackage{amsmath, amssymb}
+
+% --- Formato opcional ---
+\usepackage{microtype}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+
+\title{Construcción del Dataset para Estimación de Región de Interés en Video}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Construcción del Dataset para Estimación de Región de Interés en Video}
+
+\subsection{Motivación y Objetivo}
+
+El objetivo del presente trabajo es entrenar un modelo liviano capaz de estimar, a partir de una secuencia corta de video (5 segundos), una región de interés (ROI) cuadrada que concentre la presencia de personas, o bien indicar explícitamente su ausencia.
+
+Este módulo funciona como una etapa previa (\textit{gating stage}) para un sistema más complejo de análisis de violencia en video. La hipótesis central es que, si no hay personas en la escena o si su presencia se concentra en una región acotada, el procesamiento posterior puede restringirse espacialmente, reduciendo significativamente el costo computacional.
+
+Dado que no existen datasets públicos que contengan directamente etiquetas de ROI cuadradas optimizadas para este propósito, fue necesario diseñar y construir un dataset específico.
+
+\subsection{Formulación del Problema de Aprendizaje}
+
+El problema se formuló como una tarea de clasificación y regresión conjunta.
+
+Sea un clip de video de 5 segundos muestreado a baja tasa (2 fps), representado como un tensor:
+
+\[
+X \in \mathbb{R}^{C \times T \times H \times W}
+\]
+
+donde:
+\begin{itemize}
+    \item $C = 3$ representa los canales RGB,
+    \item $T$ es el número de frames muestreados (aproximadamente 10),
+    \item $H \times W$ es la resolución espacial normalizada.
+\end{itemize}
+
+El modelo debe predecir:
+
+\begin{itemize}
+    \item Una variable binaria $y_{present} \in \{0,1\}$ que indica presencia de personas.
+    \item Una ROI cuadrada definida por:
+    \begin{itemize}
+        \item Centro normalizado $(c_x, c_y)$,
+        \item Lado normalizado $s$.
+    \end{itemize}
+\end{itemize}
+
+En caso de ausencia de personas se define:
+
+\[
+y_{present} = 0, \quad ROI = (0,0,0,0)
+\]
+
+Este diseño desacopla la decisión de presencia de la estimación espacial, simplificando su integración con la red de análisis posterior.
+
+\subsection{Estrategia de Generación de Etiquetas mediante Teacher Model}
+
+El dataset base utilizado (RWF-2000) no contiene anotaciones espaciales por frame. Por lo tanto, se implementó una estrategia de \textit{pseudo-labeling} utilizando un detector preentrenado como modelo \textit{teacher} (YOLOv8 entrenado en COCO).
+
+Para cada clip:
+
+\begin{enumerate}
+    \item Se ejecutó detección de personas frame a frame.
+    \item Se acumularon espacialmente las detecciones a lo largo del tiempo.
+    \item Se construyó un mapa temporal de ocupación.
+    \item Se derivó una ROI cuadrada que cubriera la región de mayor presencia acumulada.
+\end{enumerate}
+
+Este enfoque permite transformar un dataset originalmente diseñado para clasificación binaria (Fight / NonFight) en un dataset supervisado de localización espacial sin necesidad de anotación manual.
+
+\subsection{Construcción de ROI para Clips con Personas}
+
+Para clips con detecciones positivas se determinó una región cuadrada que cumpliera:
+
+\begin{itemize}
+    \item Un tamaño mínimo de 224$\times$224 píxeles.
+    \item Cobertura de la región con mayor densidad temporal de detecciones.
+    \item Coherencia espacial entre frames.
+\end{itemize}
+
+La restricción de forma cuadrada responde a la necesidad de compatibilidad con la red pesada posterior, que opera con entradas normalizadas a tamaño fijo.
+
+\subsection{Manejo de Clips Sin Personas}
+
+Durante la construcción inicial del dataset se detectó que:
+
+\begin{itemize}
+    \item El modelo teacher producía falsos negativos en clips donde sí había personas.
+    \item El dataset original contiene presencia humana incluso en la clase ``NonFight''.
+\end{itemize}
+
+Para evitar contaminar el entrenamiento del modelo de gating se implementaron dos estrategias:
+
+\subsubsection*{Filtrado de Falsos Negativos}
+
+Se re-evaluaron clips etiquetados como ``sin personas'' utilizando umbrales de detección más permisivos. Aquellos donde se detectó presencia bajo condiciones más laxas fueron removidos del conjunto negativo.
+
+\subsubsection*{Generación Controlada de Negativos}
+
+Se generaron recortes cuadrados explícitamente libres de detecciones en todos los frames del clip. El procedimiento consistió en:
+
+\begin{itemize}
+    \item Evaluar múltiples tamaños posibles de ventana cuadrada (desde el máximo permitido hasta un mínimo de 224 píxeles).
+    \item Seleccionar la ventana libre de detecciones más grande posible.
+    \item Priorizar recortes amplios para evitar ejemplos triviales o poco representativos.
+\end{itemize}
+
+Esto permitió construir negativos estructuralmente coherentes con escenas reales, reduciendo el riesgo de que el modelo aprenda patrones artificiales.
+
+\subsection{Consideraciones para la Calidad del Dataset}
+
+Durante el diseño del dataset se tuvieron en cuenta los siguientes aspectos:
+
+\paragraph{Balance de clases}
+
+Se controló la proporción entre clips con presencia y sin presencia para evitar un desbalance extremo que afecte el aprendizaje de la variable binaria.
+
+\paragraph{Robustez espacial}
+
+Se impuso un tamaño mínimo fijo para la ROI, evitando sobreajuste a personas muy pequeñas o regiones excesivamente específicas.
+
+\paragraph{Robustez temporal}
+
+El uso de múltiples frames por clip permite que la ROI represente presencia sostenida y no detecciones espurias aisladas.
+
+\paragraph{Normalización estructural}
+
+Todos los clips fueron:
+
+\begin{itemize}
+    \item Muestreados a tasa fija,
+    \item Redimensionados,
+    \item Convertidos a tensores normalizados.
+\end{itemize}
+
+Esto asegura coherencia estadística en la distribución de entrada del modelo.
+
+\subsection{Resultado Final}
+
+El dataset construido contiene:
+
+\begin{itemize}
+    \item Clips con presencia de personas y ROI cuadrada válida.
+    \item Clips sin presencia y etiqueta nula.
+    \item Representación tensorial uniforme.
+    \item Eliminación de falsos negativos evidentes del modelo teacher.
+\end{itemize}
+
+Este proceso permitió generar un conjunto de entrenamiento adecuado para abordar la tarea de estimación de región de interés directamente desde secuencias de video, sin depender de anotaciones manuales por frame.
+
+\end{document}
